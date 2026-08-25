@@ -95,8 +95,12 @@ class TrailerLoad:
 class PackingResult:
     """Resultado completo de una corrida de empaque (un método)."""
     method_name: str
-    trailers: list  # list[TrailerLoad]
-    unplaced: list  # list[Delivery]
+    trailers: list  # list[TrailerLoad] -> cajas que SÍ se van a embarcar
+    unplaced: list  # list[Delivery] -> no cupieron físicamente en ninguna caja
+    rezagadas: list = field(default_factory=list)
+    # list[Delivery] -> sí cupieron en una caja, pero esa caja no alcanzó el
+    # % mínimo de llenado configurado, así que no se considera rentable
+    # embarcarla; quedan pendientes para consolidar con el siguiente pedido.
 
     @property
     def n_trailers(self) -> int:
@@ -109,6 +113,10 @@ class PackingResult:
     @property
     def n_unplaced(self) -> int:
         return len(self.unplaced)
+
+    @property
+    def n_rezagadas(self) -> int:
+        return len(self.rezagadas)
 
     @property
     def avg_utilization_pct(self) -> float:

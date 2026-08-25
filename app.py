@@ -34,6 +34,8 @@ if "result_algo" not in st.session_state:
     st.session_state.result_algo = None
 if "result_manual" not in st.session_state:
     st.session_state.result_manual = None
+if "manual_items_caja" not in st.session_state:
+    st.session_state.manual_items_caja = None
 
 st.title("🚚 Optimizador de Embarques — Cajas Secas 53'")
 st.caption(
@@ -63,6 +65,18 @@ with st.sidebar:
         help="Si se desactiva, todas las piezas se acomodan con el largo alineado al largo de la caja.")
     gap_ft = st.number_input("Separación entre piezas (ft)", value=DEFAULT_GAP_FT, min_value=0.0, step=0.05, format="%.2f")
     margin_ft = st.number_input("Margen contra pared (ft)", value=DEFAULT_WALL_MARGIN_FT, min_value=0.0, step=0.05, format="%.2f")
+
+    st.markdown("---")
+    st.header("📉 Llenado mínimo por caja")
+    min_fill_pct = st.slider(
+        "% mínimo de largo ocupado para embarcar una caja", min_value=0, max_value=95, value=0, step=5,
+        help="Si una caja no alcanza este % de su largo ocupado, no se cuenta como embarcada: sus "
+             "órdenes pasan a 'rezagadas' (pendientes de consolidar con el siguiente pedido). "
+             "0 = sin mínimo, se embarca cualquier caja con al menos una pieza.")
+    if min_fill_pct > 0:
+        st.caption(f"Solo se embarcarán cajas con **{min_fill_pct}% o más** de su largo ocupado.")
+    else:
+        st.caption("Sin mínimo configurado: se embarca cualquier caja con al menos una pieza.")
 
     st.markdown("---")
     st.caption("El producto puede ir en 2 filas a lo ancho de la caja; el alto no restringe porque no se apila.")
@@ -141,12 +155,13 @@ if run:
             result_algo = pack_algorithm(
                 deliveries, length_ft, width_ft, height_ft,
                 gap=gap_ft, margin=margin_ft,
-                allow_rotation=allow_rotation,
+                allow_rotation=allow_rotation, min_fill_pct=min_fill_pct,
             )
         st.session_state.result_algo = result_algo
         # si ya había un acomodo manual cargado de una corrida anterior, se
         # limpia para evitar comparar contra un input de deliveries distinto
         st.session_state.result_manual = None
+        st.session_state.manual_items_caja = None
         st.session_state.n_input = len(deliveries)
 
 # ---------------------------------------------------------------------------
@@ -186,41 +201,47 @@ if st.session_state.result_algo is not None:
             if not items_caja:
                 st.warning("No hay filas válidas con asignación de caja en ese Excel.")
             else:
-                result_manual = pack_manual_assignment(
-                    items_caja, length_ft, width_ft, height_ft,
-                    gap=gap_ft, margin=margin_ft, allow_rotation=allow_rotation,
-                )
-                st.session_state.result_manual = result_manual
-                st.success(
-                    f"Se cargó tu acomodo manual: {result_manual.n_placed} deliveries en "
-                    f"{result_manual.n_trailers} caja(s)."
-                )
+                st.session_state.manual_items_caja = items_caja
+                st.success(f"Se cargó tu acomodo manual: {len(items_caja)} deliveries asignados a caja.")
         except Exception as e:
             st.error(f"No se pudo leer el archivo: {e}")
+
+    # recalcula el acomodo manual con los parámetros actuales de la barra
+    # lateral (largo mínimo, rotación, etc.) cada vez que algo cambie, sin
+    # necesidad de volver a subir el excel
+    if st.session_state.manual_items_caja is not None:
+        st.session_state.result_manual = pack_manual_assignment(
+            st.session_state.manual_items_caja, length_ft, width_ft, height_ft,
+            gap=gap_ft, margin=margin_ft, allow_rotation=allow_rotation,
+            min_fill_pct=min_fill_pct,
+        )
 
     manual = st.session_state.result_manual
 
     st.markdown("---")
     st.subheader("📊 Resumen")
     if manual is not None:
-        m1, m2, m3, m4 = st.columns(4)
+        m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Cajas — manual", manual.n_trailers)
         m1.metric("Cajas — algoritmo", algo.n_trailers, delta=algo.n_trailers - manual.n_trailers, delta_color="inverse")
         m2.metric("Órdenes embarcadas — manual", manual.n_placed)
         m2.metric("Órdenes embarcadas — algoritmo", algo.n_placed, delta=algo.n_placed - manual.n_placed)
-        m3.metric("Fuera de caja — manual", manual.n_unplaced)
-        m3.metric("Fuera de caja — algoritmo", algo.n_unplaced, delta=algo.n_unplaced - manual.n_unplaced, delta_color="inverse")
-        m4.metric("% de largo usado (prom.) — manual", f"{manual.avg_utilization_pct:.1f}%")
-        m4.metric("% de largo usado (prom.) — algoritmo", f"{algo.avg_utilization_pct:.1f}%",
+        m3.metric("Rezagadas (caja no llegó al mínimo) — manual", manual.n_rezagadas)
+        m3.metric("Rezagadas (caja no llegó al mínimo) — algoritmo", algo.n_rezagadas,
+                  delta=algo.n_rezagadas - manual.n_rezagadas, delta_color="inverse")
+        m4.metric("Fuera de caja — manual", manual.n_unplaced)
+        m4.metric("Fuera de caja — algoritmo", algo.n_unplaced, delta=algo.n_unplaced - manual.n_unplaced, delta_color="inverse")
+        m5.metric("% de largo usado (prom.) — manual", f"{manual.avg_utilization_pct:.1f}%")
+        m5.metric("% de largo usado (prom.) — algoritmo", f"{algo.avg_utilization_pct:.1f}%",
                   delta=f"{algo.avg_utilization_pct - manual.avg_utilization_pct:+.1f} pp")
 
         colA, colB = st.columns(2)
         with colA:
             st.plotly_chart(
-                comparison_bar_figure(["Cajas usadas", "Fuera de caja"],
-                                       [manual.n_trailers, manual.n_unplaced],
-                                       [algo.n_trailers, algo.n_unplaced],
-                                       "Cajas usadas y órdenes fuera", "cantidad"),
+                comparison_bar_figure(["Cajas usadas", "Rezagadas", "Fuera de caja"],
+                                       [manual.n_trailers, manual.n_rezagadas, manual.n_unplaced],
+                                       [algo.n_trailers, algo.n_rezagadas, algo.n_unplaced],
+                                       "Cajas usadas, rezagadas y fuera", "cantidad"),
                 use_container_width=True,
             )
         with colB:
@@ -232,10 +253,11 @@ if st.session_state.result_algo is not None:
                 use_container_width=True,
             )
     else:
-        m1, m2, m3 = st.columns(3)
+        m1, m2, m3, m4 = st.columns(4)
         m1.metric("Cajas — algoritmo", algo.n_trailers)
         m2.metric("Órdenes embarcadas — algoritmo", algo.n_placed)
-        m3.metric("% de largo usado (prom.) — algoritmo", f"{algo.avg_utilization_pct:.1f}%")
+        m3.metric("Rezagadas (caja no llegó al mínimo) — algoritmo", algo.n_rezagadas)
+        m4.metric("% de largo usado (prom.) — algoritmo", f"{algo.avg_utilization_pct:.1f}%")
         st.info("Sube tu acomodo manual arriba para ver la comparación completa.")
 
     st.markdown("---")
@@ -267,9 +289,15 @@ if st.session_state.result_algo is not None:
         st.info("Este método no generó cajas todavía.")
 
     if result_shown and result_shown.unplaced:
-        with st.expander(f"🚫 {len(result_shown.unplaced)} orden(es) que quedaron fuera de la caja"):
+        with st.expander(f"🚫 {len(result_shown.unplaced)} orden(es) que quedaron fuera de la caja (no cupieron)"):
             rows = [{"Delivery": d.delivery, "Modelo": d.modelo, "Largo (ft)": d.largo_ft, "Ancho (ft)": d.ancho_ft}
                     for d in result_shown.unplaced]
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    if result_shown and result_shown.rezagadas:
+        with st.expander(f"📉 {len(result_shown.rezagadas)} orden(es) rezagadas (su caja no alcanzó el {min_fill_pct}% mínimo)"):
+            rows = [{"Delivery": d.delivery, "Modelo": d.modelo, "Largo (ft)": d.largo_ft, "Ancho (ft)": d.ancho_ft}
+                    for d in result_shown.rezagadas]
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     # -----------------------------------------------------------------------
@@ -286,7 +314,7 @@ if st.session_state.result_algo is not None:
         with st.spinner("Generando reporte PDF con vistas 3D..."):
             with tempfile.TemporaryDirectory() as tmpdir:
                 out_path = os.path.join(tmpdir, "reporte_embarques.pdf")
-                build_pdf_report(out_path, manual, algo, empresa=empresa, notas=notas)
+                build_pdf_report(out_path, manual, algo, empresa=empresa, notas=notas, min_fill_pct=min_fill_pct)
                 with open(out_path, "rb") as f:
                     pdf_bytes = f.read()
         st.session_state.pdf_bytes = pdf_bytes

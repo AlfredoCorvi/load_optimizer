@@ -25,6 +25,8 @@ STYLE_SUB = ParagraphStyle("Sub", parent=styles["Normal"], fontSize=11, textColo
 STYLE_H2 = ParagraphStyle("H2", parent=styles["Heading2"], spaceBefore=14, spaceAfter=6)
 STYLE_H3 = ParagraphStyle("H3", parent=styles["Heading3"], spaceBefore=8, spaceAfter=4)
 STYLE_BODY = ParagraphStyle("Body", parent=styles["Normal"], fontSize=9.5, leading=13)
+STYLE_TABLE_LABEL = ParagraphStyle("TableLabel", parent=styles["Normal"], fontSize=9, leading=11, fontName="Helvetica-Bold")
+STYLE_TABLE_LABEL_WHITE = ParagraphStyle("TableLabelWhite", parent=STYLE_TABLE_LABEL, textColor=colors.white)
 
 
 def _deliveries_table_for_trailer(trailer) -> Table:
@@ -54,13 +56,15 @@ def _deliveries_table_for_trailer(trailer) -> Table:
 def build_comparison_table(manual: PackingResult, algo: PackingResult) -> Table:
     data = [
         ["Métrica", "Acomodo manual (tu asignación)", "Algoritmo (optimizado)", "Diferencia"],
-        ["Cajas utilizadas", str(manual.n_trailers), str(algo.n_trailers), str(manual.n_trailers - algo.n_trailers)],
-        ["Órdenes embarcadas", str(manual.n_placed), str(algo.n_placed), str(algo.n_placed - manual.n_placed)],
-        ["Órdenes fuera de la caja", str(manual.n_unplaced), str(algo.n_unplaced), str(manual.n_unplaced - algo.n_unplaced)],
-        ["% de largo de la caja usado (prom.)", f"{manual.avg_utilization_pct:.1f}%", f"{algo.avg_utilization_pct:.1f}%",
+        [Paragraph("Cajas utilizadas", STYLE_TABLE_LABEL), str(manual.n_trailers), str(algo.n_trailers), str(manual.n_trailers - algo.n_trailers)],
+        [Paragraph("Órdenes embarcadas", STYLE_TABLE_LABEL), str(manual.n_placed), str(algo.n_placed), str(algo.n_placed - manual.n_placed)],
+        [Paragraph("Órdenes rezagadas (caja no llegó al mínimo)", STYLE_TABLE_LABEL), str(manual.n_rezagadas), str(algo.n_rezagadas),
+         str(manual.n_rezagadas - algo.n_rezagadas)],
+        [Paragraph("Órdenes fuera de la caja", STYLE_TABLE_LABEL), str(manual.n_unplaced), str(algo.n_unplaced), str(manual.n_unplaced - algo.n_unplaced)],
+        [Paragraph("% de largo de la caja usado (prom.)", STYLE_TABLE_LABEL), f"{manual.avg_utilization_pct:.1f}%", f"{algo.avg_utilization_pct:.1f}%",
          f"{algo.avg_utilization_pct - manual.avg_utilization_pct:+.1f} pp"],
     ]
-    t = Table(data, colWidths=[2.3 * inch, 1.9 * inch, 1.9 * inch, 1.4 * inch])
+    t = Table(data, colWidths=[2.5 * inch, 1.8 * inch, 1.8 * inch, 1.4 * inch])
     t.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -110,7 +114,7 @@ def _trailer_detail_blocks(result: PackingResult, heading: str):
 
 
 def build_pdf_report(output_path: str, manual: Optional[PackingResult], algo: PackingResult,
-                      empresa: str = "", notas: str = "") -> str:
+                      empresa: str = "", notas: str = "", min_fill_pct: float = 0.0) -> str:
     doc = SimpleDocTemplate(output_path, pagesize=letter,
                              topMargin=0.6 * inch, bottomMargin=0.6 * inch,
                              leftMargin=0.6 * inch, rightMargin=0.6 * inch)
@@ -121,6 +125,10 @@ def build_pdf_report(output_path: str, manual: Optional[PackingResult], algo: Pa
     if empresa:
         story.append(Paragraph(empresa, STYLE_SUB))
     story.append(Paragraph(f"Generado el {datetime.date.today().strftime('%d/%m/%Y')}", STYLE_SUB))
+    if min_fill_pct and min_fill_pct > 0:
+        story.append(Paragraph(
+            f"Llenado mínimo configurado: {min_fill_pct:.0f}% del largo de la caja. Las cajas que no lo "
+            f"alcanzan no se cuentan como embarcadas.", STYLE_SUB))
     story.append(Spacer(1, 14))
 
     if manual is not None:
@@ -129,7 +137,8 @@ def build_pdf_report(output_path: str, manual: Optional[PackingResult], algo: Pa
             "usuario armó de forma manual (según la caja que le asignó a cada delivery) contra el "
             "acomodo generado por el algoritmo de optimización, que evalúa distintas combinaciones "
             "de orden y ajuste para maximizar el número de órdenes embarcadas y el largo "
-            "aprovechado de cada caja.", STYLE_BODY))
+            "aprovechado de cada caja. Las cajas que no alcanzan el % mínimo de llenado configurado "
+            "no se consideran rentables para embarcar y sus órdenes se reportan como rezagadas.", STYLE_BODY))
         story.append(Spacer(1, 16))
         story.append(Paragraph("Resumen comparativo", STYLE_H2))
         story.append(build_comparison_table(manual, algo))
@@ -142,7 +151,8 @@ def build_pdf_report(output_path: str, manual: Optional[PackingResult], algo: Pa
             f"({'ahorro de ' + str(ahorro_cajas) + ' caja(s)' if ahorro_cajas > 0 else 'mismo número de cajas' if ahorro_cajas == 0 else 'usó ' + str(-ahorro_cajas) + ' caja(s) más'}), "
             f"y embarcó {algo.n_placed} órdenes contra {manual.n_placed} "
             f"({'+' if mejora_ordenes >= 0 else ''}{mejora_ordenes} órdenes), dejando {algo.n_unplaced} orden(es) fuera "
-            f"en lugar de {manual.n_unplaced}."
+            f"y {algo.n_rezagadas} rezagada(s) por no alcanzar el llenado mínimo, contra {manual.n_unplaced} "
+            f"fuera y {manual.n_rezagadas} rezagada(s) del acomodo manual."
         )
         story.append(Paragraph(conclusion, STYLE_BODY))
     else:
@@ -152,12 +162,13 @@ def build_pdf_report(output_path: str, manual: Optional[PackingResult], algo: Pa
             "para incluir aquí la comparación contra tu asignación real.", STYLE_BODY))
         story.append(Spacer(1, 16))
         resumen = [
-            ["Cajas utilizadas", str(algo.n_trailers)],
-            ["Órdenes embarcadas", str(algo.n_placed)],
-            ["Órdenes fuera de la caja", str(algo.n_unplaced)],
-            ["% de largo de la caja usado (prom.)", f"{algo.avg_utilization_pct:.1f}%"],
+            [Paragraph("Cajas utilizadas", STYLE_TABLE_LABEL_WHITE), str(algo.n_trailers)],
+            [Paragraph("Órdenes embarcadas", STYLE_TABLE_LABEL_WHITE), str(algo.n_placed)],
+            [Paragraph("Órdenes rezagadas (caja no llegó al mínimo)", STYLE_TABLE_LABEL_WHITE), str(algo.n_rezagadas)],
+            [Paragraph("Órdenes fuera de la caja", STYLE_TABLE_LABEL_WHITE), str(algo.n_unplaced)],
+            [Paragraph("% de largo de la caja usado (prom.)", STYLE_TABLE_LABEL_WHITE), f"{algo.avg_utilization_pct:.1f}%"],
         ]
-        tbl = Table(resumen, colWidths=[3.0 * inch, 2.0 * inch])
+        tbl = Table(resumen, colWidths=[3.2 * inch, 1.8 * inch])
         tbl.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#2c3e50")),
             ("TEXTCOLOR", (0, 0), (0, -1), colors.white),
@@ -180,12 +191,28 @@ def build_pdf_report(output_path: str, manual: Optional[PackingResult], algo: Pa
         if algo.unplaced:
             story.append(_unplaced_table(algo.unplaced))
         else:
-            story.append(Paragraph("Ninguna — todas las órdenes se embarcaron.", STYLE_BODY))
+            story.append(Paragraph("Ninguna — todas las órdenes cupieron en alguna caja.", STYLE_BODY))
 
         if manual is not None and manual.unplaced:
             story.append(Spacer(1, 10))
             story.append(Paragraph("Órdenes que quedaron fuera (acomodo manual)", STYLE_H3))
             story.append(_unplaced_table(manual.unplaced))
+
+    any_rezagadas = algo.rezagadas or (manual.rezagadas if manual is not None else [])
+    if any_rezagadas:
+        story.append(Spacer(1, 12))
+        story.append(Paragraph(
+            f"Órdenes rezagadas — cupieron en una caja pero esa caja no alcanzó el "
+            f"{min_fill_pct:.0f}% mínimo de llenado (algoritmo optimizado)", STYLE_H3))
+        if algo.rezagadas:
+            story.append(_unplaced_table(algo.rezagadas, header_color="#b58e2c"))
+        else:
+            story.append(Paragraph("Ninguna.", STYLE_BODY))
+
+        if manual is not None and manual.rezagadas:
+            story.append(Spacer(1, 10))
+            story.append(Paragraph("Órdenes rezagadas (acomodo manual)", STYLE_H3))
+            story.append(_unplaced_table(manual.rezagadas, header_color="#b58e2c"))
 
     story.append(PageBreak())
 
