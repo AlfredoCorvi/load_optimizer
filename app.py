@@ -1,9 +1,9 @@
 """
 Optimizador de Embarques — Streamlit app
-Compara el acomodo manual (simulado) contra un algoritmo de optimización
-para reducir el número de cajas secas de 53' usadas al embarcar cargadoras.
+Calcula el mejor acomodo posible con el algoritmo de optimización y lo
+compara contra el acomodo manual real que el usuario ya armó (subiendo un
+Excel con la columna 'Caja' indicando a qué caja va cada delivery).
 """
-import io
 import tempfile
 import os
 
@@ -17,8 +17,9 @@ from models import (
 from data_io import (
     empty_dataframe, sample_dataframe, make_template_excel_bytes,
     read_excel_to_dataframe, dataframe_to_deliveries, COLUMN_LABELS,
+    read_excel_manual_to_dataframe, dataframe_to_deliveries_with_caja,
 )
-from packing import pack_algorithm, pack_human_like
+from packing import pack_algorithm, pack_manual_assignment
 from visualization import plotly_trailer_figure, comparison_bar_figure
 from report import build_pdf_report
 
@@ -31,13 +32,13 @@ if "df" not in st.session_state:
     st.session_state.df = empty_dataframe()
 if "result_algo" not in st.session_state:
     st.session_state.result_algo = None
-if "result_human" not in st.session_state:
-    st.session_state.result_human = None
+if "result_manual" not in st.session_state:
+    st.session_state.result_manual = None
 
 st.title("🚚 Optimizador de Embarques — Cajas Secas 53'")
 st.caption(
     "Reduce el número de cajas de 53' usadas para embarcar cargadoras en tarimas, "
-    "comparando el acomodo manual típico contra un algoritmo de optimización."
+    "comparando tu acomodo manual real contra un algoritmo de optimización."
 )
 
 # ---------------------------------------------------------------------------
@@ -67,22 +68,24 @@ with st.sidebar:
     st.caption("El producto puede ir en 2 filas a lo ancho de la caja; el alto no restringe porque no se apila.")
 
 # ---------------------------------------------------------------------------
-# Entrada de datos
+# Entrada de datos para el algoritmo
 # ---------------------------------------------------------------------------
 st.header("1️⃣ Datos de las cargadoras")
-tab_excel, tab_manual = st.tabs(["📤 Subir Excel", "✍️ Captura manual"])
+tab_excel, tab_manual_entry = st.tabs(["📤 Subir Excel", "✍️ Captura manual"])
 
 with tab_excel:
     col1, col2 = st.columns([2, 1])
     with col1:
-        uploaded = st.file_uploader("Sube el Excel con los deliveries", type=["xlsx", "xls"])
+        uploaded = st.file_uploader("Sube el Excel con los deliveries", type=["xlsx", "xls"], key="uploader_algo")
     with col2:
         st.write("")
         st.write("")
         st.download_button("⬇️ Descargar plantilla", data=make_template_excel_bytes(),
                             file_name="plantilla_deliveries.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    st.caption("Columnas requeridas: " + ", ".join(COLUMN_LABELS.values()))
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="dl_template_main")
+    st.caption("Columnas requeridas: " + ", ".join(v for k, v in COLUMN_LABELS.items() if k != "caja")
+               + ". Si el excel ya trae la columna 'Caja', se ignora aquí.")
 
     if uploaded is not None:
         try:
@@ -92,7 +95,7 @@ with tab_excel:
         except Exception as e:
             st.error(f"No se pudo leer el archivo: {e}")
 
-with tab_manual:
+with tab_manual_entry:
     st.caption("Captura o edita los deliveries directamente en la tabla (doble clic para editar, + para agregar filas).")
     colb1, colb2 = st.columns([1, 1])
     with colb1:
@@ -120,9 +123,9 @@ edited_df = st.data_editor(
 st.session_state.df = edited_df
 
 # ---------------------------------------------------------------------------
-# Ejecutar comparación
+# Ejecutar algoritmo
 # ---------------------------------------------------------------------------
-st.header("2️⃣ Comparar acomodo: manual vs. algoritmo")
+st.header("2️⃣ Calcular mejor acomodo")
 run = st.button("🚀 Calcular mejor acomodo", type="primary")
 
 if run:
@@ -135,62 +138,115 @@ if run:
         st.warning("No hay deliveries válidos para procesar.")
     else:
         with st.spinner(f"Optimizando acomodo de {len(deliveries)} deliveries..."):
-            result_human = pack_human_like(
-                deliveries, length_ft, width_ft, height_ft,
-                gap=gap_ft, margin=margin_ft,
-            )
             result_algo = pack_algorithm(
                 deliveries, length_ft, width_ft, height_ft,
                 gap=gap_ft, margin=margin_ft,
                 allow_rotation=allow_rotation,
             )
-        st.session_state.result_human = result_human
         st.session_state.result_algo = result_algo
+        # si ya había un acomodo manual cargado de una corrida anterior, se
+        # limpia para evitar comparar contra un input de deliveries distinto
+        st.session_state.result_manual = None
         st.session_state.n_input = len(deliveries)
 
 # ---------------------------------------------------------------------------
 # Resultados
 # ---------------------------------------------------------------------------
-if st.session_state.result_algo is not None and st.session_state.result_human is not None:
-    human = st.session_state.result_human
+if st.session_state.result_algo is not None:
     algo = st.session_state.result_algo
 
-    st.subheader("📊 Resumen comparativo")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Cajas — manual", human.n_trailers)
-    m1.metric("Cajas — algoritmo", algo.n_trailers, delta=algo.n_trailers - human.n_trailers, delta_color="inverse")
-    m2.metric("Órdenes embarcadas — manual", human.n_placed)
-    m2.metric("Órdenes embarcadas — algoritmo", algo.n_placed, delta=algo.n_placed - human.n_placed)
-    m3.metric("Fuera de caja — manual", human.n_unplaced)
-    m3.metric("Fuera de caja — algoritmo", algo.n_unplaced, delta=algo.n_unplaced - human.n_unplaced, delta_color="inverse")
-    m4.metric("Aprovechamiento prom. — manual", f"{human.avg_utilization_pct:.1f}%")
-    m4.metric("Aprovechamiento prom. — algoritmo", f"{algo.avg_utilization_pct:.1f}%",
-              delta=f"{algo.avg_utilization_pct - human.avg_utilization_pct:+.1f} pp")
+    st.markdown("---")
+    st.header("3️⃣ Comparar contra tu acomodo manual")
+    st.caption(
+        "Sube el Excel de tu acomodo manual ya armado, usando la misma plantilla, "
+        "agregando en la columna **Caja** el número de caja (1, 2, 3...) al que "
+        "asignaste cada delivery."
+    )
+    colm1, colm2 = st.columns([2, 1])
+    with colm1:
+        uploaded_manual = st.file_uploader(
+            "Sube el Excel de tu acomodo manual (con columna 'Caja')",
+            type=["xlsx", "xls"], key="uploader_manual")
+    with colm2:
+        st.write("")
+        st.write("")
+        st.download_button("⬇️ Descargar plantilla", data=make_template_excel_bytes(),
+                            file_name="plantilla_deliveries.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="dl_template_manual")
 
-    colA, colB = st.columns(2)
-    with colA:
-        st.plotly_chart(
-            comparison_bar_figure(["Cajas usadas", "Fuera de caja"],
-                                   [human.n_trailers, human.n_unplaced],
-                                   [algo.n_trailers, algo.n_unplaced],
-                                   "Cajas usadas y órdenes fuera", "cantidad"),
-            use_container_width=True,
-        )
-    with colB:
-        labels = [f"Caja {i+1}" for i in range(max(human.n_trailers, algo.n_trailers))]
-        hv = [human.trailers[i].utilization_pct if i < len(human.trailers) else 0 for i in range(len(labels))]
-        av = [algo.trailers[i].utilization_pct if i < len(algo.trailers) else 0 for i in range(len(labels))]
-        st.plotly_chart(
-            comparison_bar_figure(labels, hv, av, "% de piso usado por caja", "% utilización"),
-            use_container_width=True,
-        )
+    if uploaded_manual is not None:
+        try:
+            df_manual = read_excel_manual_to_dataframe(uploaded_manual)
+            items_caja, errors_manual = dataframe_to_deliveries_with_caja(df_manual)
+            if errors_manual:
+                with st.expander(f"⚠️ {len(errors_manual)} fila(s) con problemas (se ignoraron)", expanded=True):
+                    for e in errors_manual:
+                        st.write("- " + e)
+            if not items_caja:
+                st.warning("No hay filas válidas con asignación de caja en ese Excel.")
+            else:
+                result_manual = pack_manual_assignment(
+                    items_caja, length_ft, width_ft, height_ft,
+                    gap=gap_ft, margin=margin_ft, allow_rotation=allow_rotation,
+                )
+                st.session_state.result_manual = result_manual
+                st.success(
+                    f"Se cargó tu acomodo manual: {result_manual.n_placed} deliveries en "
+                    f"{result_manual.n_trailers} caja(s)."
+                )
+        except Exception as e:
+            st.error(f"No se pudo leer el archivo: {e}")
+
+    manual = st.session_state.result_manual
+
+    st.markdown("---")
+    st.subheader("📊 Resumen")
+    if manual is not None:
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Cajas — manual", manual.n_trailers)
+        m1.metric("Cajas — algoritmo", algo.n_trailers, delta=algo.n_trailers - manual.n_trailers, delta_color="inverse")
+        m2.metric("Órdenes embarcadas — manual", manual.n_placed)
+        m2.metric("Órdenes embarcadas — algoritmo", algo.n_placed, delta=algo.n_placed - manual.n_placed)
+        m3.metric("Fuera de caja — manual", manual.n_unplaced)
+        m3.metric("Fuera de caja — algoritmo", algo.n_unplaced, delta=algo.n_unplaced - manual.n_unplaced, delta_color="inverse")
+        m4.metric("% de largo usado (prom.) — manual", f"{manual.avg_utilization_pct:.1f}%")
+        m4.metric("% de largo usado (prom.) — algoritmo", f"{algo.avg_utilization_pct:.1f}%",
+                  delta=f"{algo.avg_utilization_pct - manual.avg_utilization_pct:+.1f} pp")
+
+        colA, colB = st.columns(2)
+        with colA:
+            st.plotly_chart(
+                comparison_bar_figure(["Cajas usadas", "Fuera de caja"],
+                                       [manual.n_trailers, manual.n_unplaced],
+                                       [algo.n_trailers, algo.n_unplaced],
+                                       "Cajas usadas y órdenes fuera", "cantidad"),
+                use_container_width=True,
+            )
+        with colB:
+            labels = [f"Caja {i+1}" for i in range(max(manual.n_trailers, algo.n_trailers))]
+            mv = [manual.trailers[i].utilization_pct if i < len(manual.trailers) else 0 for i in range(len(labels))]
+            av = [algo.trailers[i].utilization_pct if i < len(algo.trailers) else 0 for i in range(len(labels))]
+            st.plotly_chart(
+                comparison_bar_figure(labels, mv, av, "% de largo de la caja usado", "% utilización"),
+                use_container_width=True,
+            )
+    else:
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Cajas — algoritmo", algo.n_trailers)
+        m2.metric("Órdenes embarcadas — algoritmo", algo.n_placed)
+        m3.metric("% de largo usado (prom.) — algoritmo", f"{algo.avg_utilization_pct:.1f}%")
+        st.info("Sube tu acomodo manual arriba para ver la comparación completa.")
 
     st.markdown("---")
     st.subheader("📦 Detalle 3D por caja")
-    metodo = st.radio("Ver acomodo de:", ["Algoritmo (optimizado)", "Acomodo manual (simulado)"], horizontal=True)
-    result_shown = algo if metodo.startswith("Algoritmo") else human
+    opciones_metodo = ["Algoritmo (optimizado)"]
+    if manual is not None:
+        opciones_metodo.append("Acomodo manual (tu asignación)")
+    metodo = st.radio("Ver acomodo de:", opciones_metodo, horizontal=True)
+    result_shown = algo if metodo.startswith("Algoritmo") else manual
 
-    if result_shown.trailers:
+    if result_shown and result_shown.trailers:
         idx = st.selectbox("Selecciona la caja", list(range(1, len(result_shown.trailers) + 1)),
                             format_func=lambda i: f"Caja #{i} — {len(result_shown.trailers[i-1].items)} piezas")
         trailer = result_shown.trailers[idx - 1]
@@ -208,9 +264,9 @@ if st.session_state.result_algo is not None and st.session_state.result_human is
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     else:
-        st.info("Este método no generó cajas (sin deliveries válidos).")
+        st.info("Este método no generó cajas todavía.")
 
-    if result_shown.unplaced:
+    if result_shown and result_shown.unplaced:
         with st.expander(f"🚫 {len(result_shown.unplaced)} orden(es) que quedaron fuera de la caja"):
             rows = [{"Delivery": d.delivery, "Modelo": d.modelo, "Largo (ft)": d.largo_ft, "Ancho (ft)": d.ancho_ft}
                     for d in result_shown.unplaced]
@@ -221,6 +277,8 @@ if st.session_state.result_algo is not None and st.session_state.result_human is
     # -----------------------------------------------------------------------
     st.markdown("---")
     st.subheader("📄 Reporte PDF")
+    if manual is None:
+        st.caption("El reporte incluirá solo el acomodo del algoritmo. Sube tu acomodo manual para incluir la comparación.")
     empresa = st.text_input("Nombre de la empresa / línea (opcional)", value="")
     notas = st.text_area("Notas adicionales para el reporte (opcional)", value="")
 
@@ -228,7 +286,7 @@ if st.session_state.result_algo is not None and st.session_state.result_human is
         with st.spinner("Generando reporte PDF con vistas 3D..."):
             with tempfile.TemporaryDirectory() as tmpdir:
                 out_path = os.path.join(tmpdir, "reporte_embarques.pdf")
-                build_pdf_report(out_path, human, algo, empresa=empresa, notas=notas)
+                build_pdf_report(out_path, manual, algo, empresa=empresa, notas=notas)
                 with open(out_path, "rb") as f:
                     pdf_bytes = f.read()
         st.session_state.pdf_bytes = pdf_bytes
@@ -238,4 +296,4 @@ if st.session_state.result_algo is not None and st.session_state.result_human is
         st.download_button("⬇️ Descargar reporte PDF", data=st.session_state.pdf_bytes,
                             file_name="reporte_optimizacion_embarques.pdf", mime="application/pdf")
 else:
-    st.info("Captura o sube tus deliveries y presiona **Calcular mejor acomodo** para ver la comparación.")
+    st.info("Captura o sube tus deliveries y presiona **Calcular mejor acomodo** para continuar.")

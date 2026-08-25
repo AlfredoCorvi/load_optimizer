@@ -76,9 +76,13 @@ class TrailerLoad:
 
     @property
     def utilization_pct(self) -> float:
-        if self.total_area_ft2 <= 0:
+        """% del LARGO de la caja que se usa (antes era % de piso/área).
+        Se calcula como el largo ocupado entre el largo nominal de la caja,
+        que es la referencia que más le importa a operaciones: qué tanto
+        de los 53 ft se aprovechó."""
+        if self.length_ft <= 0:
             return 0.0
-        return 100.0 * self.used_area_ft2 / self.total_area_ft2
+        return 100.0 * self.used_length_ft / self.length_ft
 
     @property
     def used_length_ft(self) -> float:

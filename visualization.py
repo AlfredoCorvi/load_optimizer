@@ -79,7 +79,7 @@ def plotly_trailer_figure(trailer: TrailerLoad, title: str = "") -> go.Figure:
         ))
 
     fig.update_layout(
-        title=title or f"Caja #{trailer.index} — {len(trailer.items)} piezas, {trailer.utilization_pct:.1f}% de piso usado",
+        title=title or f"Caja #{trailer.index} — {len(trailer.items)} piezas, {trailer.utilization_pct:.1f}% de largo usado",
         scene=dict(
             xaxis_title="Largo (ft)", yaxis_title="Ancho (ft)", zaxis_title="Alto (ft)",
             aspectmode="manual",
@@ -123,7 +123,7 @@ def matplotlib_trailer_image(trailer: TrailerLoad, title: str = "", show_title: 
     ax.view_init(elev=28, azim=-60)
     ax.tick_params(labelsize=6)
     if show_title:
-        ax.set_title(title or f"Caja #{trailer.index} — {len(trailer.items)} piezas · {trailer.utilization_pct:.1f}% de piso usado",
+        ax.set_title(title or f"Caja #{trailer.index} — {len(trailer.items)} piezas · {trailer.utilization_pct:.1f}% de largo usado",
                      fontsize=9)
 
     buf = io.BytesIO()

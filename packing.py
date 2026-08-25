@@ -13,12 +13,16 @@ Se implementan dos métodos para poder comparar:
    (menos cajas / menos piezas fuera / mayor aprovechamiento). Esto imita
    "cómo lo haría el programa pensando en todas las combinaciones razonables".
 
-2. `pack_human_like` -> heurística simple de "dos carriles" (izquierda/derecha
-   de la caja), colocando piezas en el orden en que llegan (como normalmente
-   arma la carga una persona con la lista de deliveries), sin recombinar.
-   Sirve como línea base para comparar contra el algoritmo.
+2. `pack_manual_assignment` -> arma el resultado a partir de la asignación de
+   caja que el propio usuario definió en su Excel (columna 'Caja': 1, 2, 3...).
+   Cada pieza se acomoda dentro de la caja física que se le asignó (con el
+   mismo motor MaxRects, pero limitado a esa sola caja); si alguna pieza no
+   cabe físicamente en la caja que se le asignó, se reporta como 'fuera de
+   caja'. Sirve como línea base real (no simulada) para comparar contra el
+   algoritmo.
 """
 from __future__ import annotations
+from collections import defaultdict
 from typing import List, Tuple
 
 from models import Delivery, PlacedItem, TrailerLoad, PackingResult, DEFAULT_GAP_FT, DEFAULT_WALL_MARGIN_FT
@@ -230,73 +234,33 @@ def pack_algorithm(deliveries: List[Delivery], length_ft: float, width_ft: float
 
 
 # ---------------------------------------------------------------------------
-# Método 2: simulación "estilo humano" (dos carriles, orden de llegada)
+# Método 2: acomodo manual real, según la asignación de caja del usuario
 # ---------------------------------------------------------------------------
 
-def pack_human_like(deliveries: List[Delivery], length_ft: float, width_ft: float, height_ft: float,
-                     gap: float = DEFAULT_GAP_FT,
-                     margin: float = DEFAULT_WALL_MARGIN_FT) -> PackingResult:
-    """Simula cómo suele armar la carga una persona con la lista tal cual
-    llega: separa la caja en 2 carriles (izquierda/derecha a lo ancho) y va
-    llenando cada carril de frente hacia el fondo en el orden de la lista,
-    sin reacomodar ni buscar huecos. Es una línea base representativa del
-    acomodo manual típico, para poder comparar contra el algoritmo."""
-    items = list(deliveries)
-    if not items:
-        return PackingResult(method_name="Acomodo manual (simulado)", trailers=[], unplaced=[])
-
-    usable_l = length_ft - 2 * margin
-    usable_w = width_ft - 2 * margin
-    lane_w = usable_w / 2.0
+def pack_manual_assignment(deliveries_with_caja: List[Tuple[Delivery, int]],
+                            length_ft: float, width_ft: float, height_ft: float,
+                            gap: float = DEFAULT_GAP_FT, margin: float = DEFAULT_WALL_MARGIN_FT,
+                            allow_rotation: bool = True) -> PackingResult:
+    """Arma el resultado 'manual' a partir de la asignación de caja que el
+    usuario definió en su propio excel (columna 'Caja': 1, 2, 3...). Agrupa
+    las piezas por número de caja y las coloca dentro de esa caja física, en
+    el orden en que vienen en el archivo. Si alguna pieza no cabe en la caja
+    que se le asignó, se reporta como 'fuera de caja' (con el motivo)."""
+    groups: dict = defaultdict(list)
+    for d, caja_num in deliveries_with_caja:
+        groups[caja_num].append(d)
 
     trailers: List[TrailerLoad] = []
     unplaced: List[Delivery] = []
 
-    def new_trailer(idx):
-        return TrailerLoad(index=idx, length_ft=length_ft, width_ft=width_ft, height_ft=height_ft, items=[])
-
-    trailer = new_trailer(1)
-    lane_cursor = [margin, margin]  # posición x disponible en carril 0 (arriba) y carril 1 (abajo)
-    trailers.append(trailer)
-
-    for d in items:
-        w = d.largo_efectivo_ft + gap
-        h = d.ancho_ft + gap
-        if h > lane_w + 1e-9:
-            # no cabe en un solo carril (pieza muy ancha) -> intenta usar la caja completa como un carril
-            if h > usable_w + 1e-9 or w > (usable_l - (max(lane_cursor) - margin)) + 1e-9:
+    for caja_num in sorted(groups.keys()):
+        b = Bin(length_ft, width_ft, height_ft, gap, margin)
+        for d in groups[caja_num]:
+            if not b.try_place(d, allow_rotation):
                 unplaced.append(d)
-                continue
-
-        placed_here = False
-        # intenta en el carril con más espacio restante primero (más parecido a cómo
-        # decide una persona: "en este lado todavía cabe")
-        lane_order = sorted(range(2), key=lambda i: lane_cursor[i])
-        for lane in lane_order:
-            remaining = (margin + usable_l) - lane_cursor[lane]
-            if w <= remaining + 1e-9 and h <= lane_w + 1e-9:
-                x = lane_cursor[lane]
-                y = margin + lane * lane_w
-                item = PlacedItem(delivery=d, x_ft=x, y_ft=y,
-                                   largo_ft=d.largo_efectivo_ft, ancho_ft=d.ancho_ft,
-                                   alto_ft=d.alto_ft, rotated=False)
-                trailer.items.append(item)
-                lane_cursor[lane] += w
-                placed_here = True
-                break
-
-        if not placed_here:
-            # abre una caja nueva (una persona típicamente no reacomoda lo ya cargado)
-            trailer = new_trailer(len(trailers) + 1)
+        trailer = _bin_to_trailerload(b, caja_num)
+        if trailer.items:
             trailers.append(trailer)
-            lane_cursor = [margin, margin]
-            x = lane_cursor[0]
-            y = margin
-            item = PlacedItem(delivery=d, x_ft=x, y_ft=y,
-                               largo_ft=d.largo_efectivo_ft, ancho_ft=d.ancho_ft,
-                               alto_ft=d.alto_ft, rotated=False)
-            trailer.items.append(item)
-            lane_cursor[0] += w
 
-    trailers = [t for t in trailers if t.items]
-    return PackingResult(method_name="Acomodo manual (simulado)", trailers=trailers, unplaced=unplaced)
+    return PackingResult(method_name="Acomodo manual (tu asignación por caja)",
+                          trailers=trailers, unplaced=unplaced)

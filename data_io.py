@@ -11,6 +11,7 @@ import pandas as pd
 from models import Delivery
 
 COLUMNS = ["modelo", "delivery", "bulto_extra", "largo_ft", "ancho_ft", "alto_ft"]
+COLUMNS_MANUAL = COLUMNS + ["caja"]
 COLUMN_LABELS = {
     "modelo": "Modelo",
     "delivery": "Delivery",
@@ -18,6 +19,7 @@ COLUMN_LABELS = {
     "largo_ft": "Largo (ft)",
     "ancho_ft": "Ancho (ft)",
     "alto_ft": "Alto (ft)",
+    "caja": "Caja",
 }
 
 
@@ -52,15 +54,30 @@ def sample_dataframe(n: int = 6) -> pd.DataFrame:
 
 
 def make_template_excel_bytes() -> bytes:
-    df = sample_dataframe(3)
+    """Plantilla única, reutilizable tanto para subir deliveries al cálculo
+    del algoritmo (columna 'Caja' se ignora) como para subir tu acomodo
+    manual ya armado (columna 'Caja' obligatoria: indica a qué caja va cada
+    delivery, 1, 2, 3...)."""
+    df = sample_dataframe(6)
+    # ejemplo de asignación manual: primeras 3 piezas a la caja 1, resto a la caja 2
+    df["caja"] = [1, 1, 1, 2, 2, 2][:len(df)]
     df = df.rename(columns=COLUMN_LABELS)
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Deliveries")
         ws = writer.sheets["Deliveries"]
-        widths = [14, 12, 12, 12, 12, 12]
+        widths = [14, 12, 12, 12, 12, 12, 10]
         for col_idx, w in enumerate(widths, start=1):
             ws.column_dimensions[chr(64 + col_idx)].width = w
+
+        notes = pd.DataFrame({"Instrucciones": [
+            "Esta misma plantilla se usa en dos lugares de la app:",
+            "1) Subir deliveries para que el algoritmo calcule el mejor acomodo: la columna 'Caja' no es necesaria, puede dejarse vacía.",
+            "2) Subir tu propio acomodo manual para comparar contra el algoritmo: la columna 'Caja' es obligatoria y debe indicar a qué caja (1, 2, 3...) va cada delivery.",
+            "'Bulto extra': deja vacío si no aplica, o escribe 'y' por cada bulto extra (y = 1, yy = 2, yyy = 3...).",
+        ]})
+        notes.to_excel(writer, index=False, sheet_name="Instrucciones")
+        writer.sheets["Instrucciones"].column_dimensions["A"].width = 100
     buf.seek(0)
     return buf.read()
 
@@ -68,7 +85,24 @@ def make_template_excel_bytes() -> bytes:
 def read_excel_to_dataframe(file) -> pd.DataFrame:
     """Lee un excel subido por el usuario y normaliza nombres de columnas,
     aceptando tanto encabezados en español (con acentos/espacios) como
-    los nombres técnicos internos."""
+    los nombres técnicos internos. Ignora la columna 'Caja' si viene
+    incluida (no aplica para el cálculo del algoritmo)."""
+    df = _read_excel_normalized(file, required=COLUMNS)
+    df = df[COLUMNS].copy()
+    df = _coerce_column_dtypes(df)
+    return df
+
+
+def read_excel_manual_to_dataframe(file) -> pd.DataFrame:
+    """Lee un excel de acomodo manual: igual que `read_excel_to_dataframe`
+    pero exige además la columna 'Caja' (a qué caja pertenece cada delivery)."""
+    df = _read_excel_normalized(file, required=COLUMNS_MANUAL)
+    df = df[COLUMNS_MANUAL].copy()
+    df = _coerce_column_dtypes(df)
+    return df
+
+
+def _read_excel_normalized(file, required) -> pd.DataFrame:
     raw = pd.read_excel(file)
     reverse_labels = {v.lower(): k for k, v in COLUMN_LABELS.items()}
     norm_cols = {}
@@ -76,7 +110,7 @@ def read_excel_to_dataframe(file) -> pd.DataFrame:
         key = str(c).strip().lower()
         if key in reverse_labels:
             norm_cols[c] = reverse_labels[key]
-        elif key in COLUMNS:
+        elif key in COLUMNS_MANUAL:
             norm_cols[c] = key
         else:
             # intenta coincidencias parciales comunes
@@ -90,16 +124,16 @@ def read_excel_to_dataframe(file) -> pd.DataFrame:
                 norm_cols[c] = "largo_ft"
             elif "anch" in key:
                 norm_cols[c] = "ancho_ft"
+            elif "caja" in key or "box" in key or "trailer" in key or "camion" in key or "camión" in key:
+                norm_cols[c] = "caja"
             elif "alt" in key:
                 norm_cols[c] = "alto_ft"
     df = raw.rename(columns=norm_cols)
-    missing = [c for c in COLUMNS if c not in df.columns]
+    missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(
             "Al excel le faltan columnas requeridas: " + ", ".join(COLUMN_LABELS[m] for m in missing)
         )
-    df = df[COLUMNS].copy()
-    df = _coerce_column_dtypes(df)
     return df
 
 
@@ -124,6 +158,9 @@ def _coerce_column_dtypes(df: pd.DataFrame) -> pd.DataFrame:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df["delivery"] = pd.to_numeric(df["delivery"], errors="coerce").astype("Int64")
+
+    if "caja" in df.columns:
+        df["caja"] = pd.to_numeric(df["caja"], errors="coerce").astype("Int64")
 
     return df
 
@@ -191,3 +228,61 @@ def dataframe_to_deliveries(df: pd.DataFrame) -> Tuple[List[Delivery], List[str]
             errors.append(f"{row_label}: dato inválido ({e}).")
 
     return deliveries, errors
+
+
+def dataframe_to_deliveries_with_caja(df: pd.DataFrame) -> Tuple[List[Tuple[Delivery, int]], List[str]]:
+    """Igual que `dataframe_to_deliveries`, pero además exige y valida la
+    columna 'Caja' (a qué caja pertenece cada delivery), usada para el
+    acomodo manual que sube el propio usuario."""
+    result: List[Tuple[Delivery, int]] = []
+    errors: List[str] = []
+    df = df.dropna(how="all")
+
+    for i, row in df.iterrows():
+        row_label = f"Fila {i + 1}"
+        try:
+            modelo = str(row["modelo"]).strip()
+            if not modelo or modelo.lower() == "nan":
+                errors.append(f"{row_label}: falta el modelo.")
+                continue
+            delivery_val = row["delivery"]
+            if pd.isna(delivery_val):
+                errors.append(f"{row_label}: falta el número de delivery.")
+                continue
+            delivery_int = int(delivery_val)
+
+            try:
+                bulto_count = parse_bulto_extra(row["bulto_extra"])
+            except ValueError as e:
+                errors.append(f"{row_label}: {e}.")
+                continue
+
+            largo = float(row["largo_ft"])
+            ancho = float(row["ancho_ft"])
+            alto = float(row["alto_ft"]) if not pd.isna(row["alto_ft"]) else 0.0
+
+            if largo <= 0 or ancho <= 0:
+                errors.append(f"{row_label}: largo y ancho deben ser mayores a 0.")
+                continue
+
+            caja_val = row.get("caja")
+            if pd.isna(caja_val):
+                errors.append(f"{row_label}: falta el número de caja (columna 'Caja').")
+                continue
+            try:
+                caja_int = int(caja_val)
+                if caja_int <= 0:
+                    raise ValueError()
+            except (ValueError, TypeError):
+                errors.append(f"{row_label}: 'Caja' debe ser un entero positivo (1, 2, 3...).")
+                continue
+
+            delivery = Delivery(
+                modelo=modelo, delivery=delivery_int, bulto_extra=bulto_count,
+                largo_ft=largo, ancho_ft=ancho, alto_ft=alto,
+            )
+            result.append((delivery, caja_int))
+        except Exception as e:
+            errors.append(f"{row_label}: dato inválido ({e}).")
+
+    return result, errors
